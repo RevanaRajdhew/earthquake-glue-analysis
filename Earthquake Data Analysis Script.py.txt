@@ -1,0 +1,140 @@
+from pyspark.sql.functions import col, avg, count, max, min, to_date, date_format
+from pyspark.sql.types import TimestampType
+
+def analyze_earthquake_data():
+
+    print("Reading processed earthquake data (Parquet only)...")
+
+    try:
+        data_path = f"s3://{SOURCE_BUCKET}/processed/"
+        df = spark.read.parquet(data_path)
+        print("✅ Successfully read partitioned parquet data")
+    except Exception as e:
+        print(f"❌ Could not read parquet data in {SOURCE_BUCKET}. Error: {str(e)}")
+        return
+
+    print(f"Total earthquake records found: {df.count()}")
+
+  
+    df = df.withColumn(
+            "time",
+            (col("time") / 1000).cast(TimestampType())  # Convert ms → seconds → timestamp
+        ).select(
+            col("time"),
+            col("place"),
+            col("magnitude").cast("double"),
+            col("longitude").cast("double"),
+            col("latitude").cast("double"),
+            col("depth").cast("double"),
+            col("type")
+        ).filter(col("magnitude").isNotNull())
+
+   
+    df = df.withColumn("date", to_date(col("time")))
+
+    
+    df = df.withColumn("country_region", extract_country_udf(col("place")))
+
+    print("Starting analysis...")
+
+    
+    print("1️⃣ Calculating average magnitude per day...")
+    avg_magnitude_per_day = df.groupBy("date") \
+        .agg(
+            avg("magnitude").alias("avg_magnitude"),
+            count("*").alias("earthquake_count"),
+            max("magnitude").alias("max_magnitude"),
+            min("magnitude").alias("min_magnitude")
+        ) \
+        .orderBy("date")
+
+    analysis1_path = f"s3://{ANALYSIS_BUCKET}/avg_magnitude_per_day/"
+    avg_magnitude_per_day.write.mode("overwrite").parquet(analysis1_path)
+
+    print("📊 Sample - Average magnitude per day:")
+    avg_magnitude_per_day.show(10)
+
+    print("\n2️⃣ Finding top 10 largest earthquakes...")
+    top_10_earthquakes = df.select(
+        "time", "place", "magnitude", "longitude", "latitude", "depth", "country_region"
+    ).orderBy(col("magnitude").desc()).limit(10)
+
+    analysis2_path = f"s3://{ANALYSIS_BUCKET}/top_10_earthquakes/"
+    top_10_earthquakes.write.mode("overwrite").parquet(analysis2_path)
+
+    print("🏆 Top 10 largest earthquakes:")
+    top_10_earthquakes.show(10, truncate=False)
+
+    print("\n3️⃣ Counting earthquakes per country/region...")
+    earthquakes_by_region = df.groupBy("country_region") \
+        .agg(
+            count("*").alias("earthquake_count"),
+            avg("magnitude").alias("avg_magnitude"),
+            max("magnitude").alias("max_magnitude"),
+            min("magnitude").alias("min_magnitude")
+        ) \
+        .orderBy(col("earthquake_count").desc())
+
+    analysis3_path = f"s3://{ANALYSIS_BUCKET}/earthquakes_by_region/"
+    earthquakes_by_region.write.mode("overwrite").parquet(analysis3_path)
+
+    print("🌍 Top 20 regions by earthquake count:")
+    earthquakes_by_region.show(20, truncate=False)
+
+    print("\n📈 Generating monthly trends...")
+    monthly_trends = df.withColumn("year_month", date_format(col("date"), "yyyy-MM")) \
+        .groupBy("year_month") \
+        .agg(
+            count("*").alias("earthquake_count"),
+            avg("magnitude").alias("avg_magnitude"),
+            max("magnitude").alias("max_magnitude")
+        ) \
+        .orderBy("year_month")
+
+    analysis4_path = f"s3://{ANALYSIS_BUCKET}/monthly_trends/"
+    monthly_trends.write.mode("overwrite").parquet(analysis4_path)
+
+    print("📅 Monthly trends:")
+    monthly_trends.show()
+
+ 
+    print("\n📊 Generating summary statistics...")
+    total_earthquakes = df.count()
+    date_range = df.agg(min("date").alias("start_date"), max("date").alias("end_date")).collect()[0]
+    magnitude_stats = df.agg(
+        avg("magnitude").alias("avg_mag"),
+        min("magnitude").alias("min_mag"),
+        max("magnitude").alias("max_mag")
+    ).collect()[0]
+
+    summary_data = [{
+        "total_earthquakes": total_earthquakes,
+        "date_range_start": str(date_range["start_date"]),
+        "date_range_end": str(date_range["end_date"]),
+        "avg_magnitude": float(magnitude_stats["avg_mag"]),
+        "min_magnitude": float(magnitude_stats["min_mag"]),
+        "max_magnitude": float(magnitude_stats["max_mag"]),
+        "unique_regions": earthquakes_by_region.count()
+    }]
+
+    summary_df = spark.createDataFrame(summary_data)
+    summary_path = f"s3://{ANALYSIS_BUCKET}/summary/"
+    summary_df.write.mode("overwrite").parquet(summary_path)
+
+    # Print comprehensive summary
+    print("\n" + "="*60)
+    print("🌍 EARTHQUAKE DATA ANALYSIS SUMMARY")
+    print("="*60)
+    print(f"📊 Total Earthquakes: {total_earthquakes:,}")
+    print(f"📅 Date Range: {date_range['start_date']} to {date_range['end_date']}")
+    print(f"📈 Average Magnitude: {magnitude_stats['avg_mag']:.2f}")
+    print(f"📏 Magnitude Range: {magnitude_stats['min_mag']:.1f} to {magnitude_stats['max_mag']:.1f}")
+    print(f"🌍 Unique Regions: {earthquakes_by_region.count()}")
+    print("="*60)
+    print("✅ Analysis complete! Check these S3 locations:")
+    print(f"   📈 Daily averages: {analysis1_path}")
+    print(f"   🏆 Top 10 earthquakes: {analysis2_path}")
+    print(f"   🌍 By region: {analysis3_path}")
+    print(f"   📅 Monthly trends: {analysis4_path}")
+    print(f"   📊 Summary: {summary_path}")
+    print("="*60)

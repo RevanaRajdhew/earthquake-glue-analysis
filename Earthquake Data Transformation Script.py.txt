@@ -1,0 +1,79 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
+import json
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+SOURCE_BUCKET = "earthquake-data-raw"
+TARGET_BUCKET = "earthquake-data-transformed"
+SOURCE_PREFIX = ""  # Assuming files are in root of bucket
+TARGET_PREFIX = "processed/"
+
+def process_earthquake_json(spark, source_path, target_path):
+    """
+    Process earthquake GeoJSON files and transform to tabular format
+    """
+    
+    df = spark.read.option("multiline", "true").json(f"{source_path}*.json")
+    
+ 
+    features_df = df.select(explode(col("features")).alias("feature"))
+    
+    extracted_df = features_df.select(
+        col("feature.properties.time").alias("timestamp_ms"),
+        col("feature.properties.place").alias("place"),
+        col("feature.properties.mag").alias("magnitude"),
+        col("feature.properties.type").alias("type"),
+        col("feature.geometry.coordinates").getItem(0).alias("longitude"),
+        col("feature.geometry.coordinates").getItem(1).alias("latitude"),
+        col("feature.geometry.coordinates").getItem(2).alias("depth")
+    )
+    
+
+    final_df = extracted_df.select(
+        from_unixtime(col("timestamp_ms") / 1000).alias("time"),
+        col("place"),
+        col("magnitude").cast("double"),
+        col("longitude").cast("double"),
+        col("latitude").cast("double"),
+        col("depth").cast("double"),
+        col("type")
+    ).filter(
+        col("time").isNotNull() & 
+        col("magnitude").isNotNull() & 
+        col("longitude").isNotNull() & 
+        col("latitude").isNotNull()
+    )
+    
+    final_df.withColumn("year", year(col("time"))) \
+           .withColumn("month", month(col("time"))) \
+           .write \
+           .mode("overwrite") \
+           .partitionBy("year", "month") \
+           .parquet(target_path)
+    
+    return final_df.count()
+
+source_path = f"s3://{SOURCE_BUCKET}/{SOURCE_PREFIX}"
+target_path = f"s3://{TARGET_BUCKET}/{TARGET_PREFIX}"
+
+print(f"Processing files from: {source_path}")
+print(f"Writing results to: {target_path}")
+
+record_count = process_earthquake_json(spark, source_path, target_path)
+
+print(f"Successfully processed {record_count} earthquake records")
+
+job.commit()

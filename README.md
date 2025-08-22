@@ -5,7 +5,7 @@ This project implements an end-to-end earthquake data pipeline using AWS service
 ---
 
 ## Architecture
-
+![Earthquake Data Pipeline](images/Modeldatabases-Page2.jpeg)
 
 ## 📌 Overview
 
@@ -60,7 +60,7 @@ earthquakes_per_region.parquet → Geographical distribution of earthquakes.
 ---
 
 ## 🚀 How to Run
-Prerequisites
+# Prerequisites
 
 AWS account with permissions for Lambda, Glue, and S3.
 
